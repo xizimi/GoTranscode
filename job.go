@@ -1,25 +1,13 @@
-// job.go
 package main
 
-import "time"
 
-type JobStatus string
-
-const (
-	StatusQueued     JobStatus = "queued"
-	StatusProcessing JobStatus = "processing"
-	StatusCompleted  JobStatus = "completed"
-	StatusFailed     JobStatus = "failed"
-)
+// // 全局 Kafka 客户端（简单起见，实际项目建议封装）
+// var (
+// 	kafkaWriter *kafka.Writer
+// 	kafkaReader *kafka.Reader
+// )
 
 type Job struct {
-	ID            string     `json:"job_id"`
-	InputURL      string     `json:"input_url"`
-	OutputProfiles []string  `json:"output_profiles"`
-	Status        JobStatus  `json:"status"`
-	CreatedAt     time.Time  `json:"created_at"`
-	FinishedAt    *time.Time `json:"finished_at,omitempty"`
-	OutputPaths   []string   `json:"outputs,omitempty"`
+	InputPath      string   `json:"input_path"`
+	OutputProfiles []string `json:"output_profiles"`
 }
-
-var jobStore = make(map[string]*Job)

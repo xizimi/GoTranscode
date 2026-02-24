@@ -1,1 +1,0 @@
-curl -X POST http://localhost:8078/transcode -H "Content-Type: application/json" -d '{"input_url":"/home/zhaobowen/project/go_project/GoTranscode/video_path/test_2.mp4","output_profiles":["720p"]}'

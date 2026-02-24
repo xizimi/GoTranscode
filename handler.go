@@ -1,52 +1,42 @@
-// handler.go
 package main
 
 import (
-	"time"
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
+	"net/http"
 )
 
-func submitTranscode(c *gin.Context) {
-	var req struct {
-		InputURL      string   `json:"input_url" binding:"required"`
-		OutputProfiles []string `json:"output_profiles" binding:"required"`
-		CallbackURL   string   `json:"callback_url"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(400, gin.H{"error": err.Error()})
-		return
-	}
-
-	jobID := uuid.New().String()
-	job := &Job{
-		ID:             jobID,
-		InputURL:       req.InputURL,
-		OutputProfiles: req.OutputProfiles,
-		Status:         StatusQueued,
-		CreatedAt:      time.Now(),
-	}
-	mu.Lock()
-	jobStore[jobID] = job
-	mu.Unlock()
-
-	EnqueueJob(job)
-
-	c.JSON(202, gin.H{
-		"job_id": jobID,
-		"status": StatusQueued,
-	})
+func setupRouter() *gin.Engine {
+	r := gin.Default()
+	r.POST("/transcode", transcodeHandler)
+	r.GET("/health", healthHandler)
+	return r
 }
 
-func getJobStatus(c *gin.Context) {
-	jobID := c.Param("id")
-	mu.RLock()
-	job, exists := jobStore[jobID]
-	mu.RUnlock()
+func transcodeHandler(c *gin.Context) {
+	var req struct {
+		InputPath      string   `json:"input_path"`
+		OutputProfiles []string `json:"output_profiles"`
+	}
 
-	if !exists {
-		c.JSON(404, gin.H{"error": "job not found"})
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(200, job)
+
+	job := Job{
+		InputPath:      req.InputPath,
+		OutputProfiles: req.OutputProfiles,
+	}
+
+	// 关键修改：使用 Kafka AddJob 替代内存队列
+	if err := AddJob(job); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to queue job"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Job queued successfully"})
+}
+
+func healthHandler(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"status": "healthy"})
 }

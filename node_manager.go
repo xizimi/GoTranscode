@@ -78,12 +78,24 @@ func GetJobStatusFromRedis(jobID string) (*JobStatus, error) {
 
 func ReportNodeHeartbeat(nodeID string, currentLoad int) error {
 	nodeKey := keyNodePrefix + nodeID
+	
+	// 新增：获取节点任务统计
+	statsMu.Lock()
+	completedCount := nodeCompletedCount
+	failedCount := nodeFailedCount
+	statsMu.Unlock()
+	
+	// 新增：采集系统资源（用于 Redis 存储，不打印日志）
+	cpuPercent, memPercent, _ := collectSystemMetrics()
 
 	info := map[string]interface{}{
-		"last_heartbeat": time.Now().Unix(),
-		"load":           currentLoad,
-		"status":         "online",
-		"timestamp":      time.Now().Format(time.RFC3339),
+		"last_heartbeat":       time.Now().Format(time.RFC3339),
+		"load":                 currentLoad,
+		"status":               "online",
+		"completed_tasks":      completedCount,
+		"failed_tasks":         failedCount,
+		"cpu_usage_percent":    cpuPercent,
+		"memory_usage_percent": memPercent,
 	}
 
 	data, _ := json.Marshal(info)

@@ -68,9 +68,24 @@ func clusterStatusHandler(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	
+	// 新增：获取 Kafka 队列长度
+	var pendingTasks int64 = 0
+	if kafkaReader != nil {
+		stats := kafkaReader.Stats()
+		pendingTasks = stats.Lag
+	}
+	
+	// 新增：查询时实时采集系统指标（不再定时打印）
+	cpuPercent, memPercent, _ := collectSystemMetrics()
+	
 	c.JSON(http.StatusOK, gin.H{
-		"total_nodes": len(nodes),
-		"nodes":       nodes,
+		"total_nodes":           len(nodes),
+		"nodes":                 nodes,
+		"kafka_pending_tasks":   pendingTasks,
+		// 新增：实时系统指标（仅查询时返回）
+		"current_cpu_usage":     cpuPercent,
+		"current_memory_usage":  memPercent,
 	})
 }
 

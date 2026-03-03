@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/segmentio/kafka-go"
+	"github.com/shirou/gopsutil/v3/cpu"
+	"github.com/shirou/gopsutil/v3/mem"
 )
 
 var (
@@ -34,6 +36,11 @@ var (
 	loadMu         sync.Mutex
 	closeOnce      sync.Once
 	shutdownChan   chan struct{}
+	
+	// 新增：节点任务统计
+	nodeCompletedCount int
+	nodeFailedCount    int
+	statsMu            sync.Mutex
 )
 
 type Job struct {
@@ -158,6 +165,27 @@ func startHeartbeat() {
 	}
 }
 
+// 新增：采集系统资源使用率
+func collectSystemMetrics() (cpuPercent float64, memPercent float64, err error) {
+	// 获取 CPU 使用率
+	cpuPercentages, err := cpu.Percent(time.Second, false)
+	if err != nil {
+		return 0, 0, err
+	}
+	if len(cpuPercentages) > 0 {
+		cpuPercent = cpuPercentages[0]
+	}
+	
+	// 获取内存使用率
+	memInfo, err := mem.VirtualMemory()
+	if err != nil {
+		return cpuPercent, 0, err
+	}
+	memPercent = memInfo.UsedPercent
+	
+	return cpuPercent, memPercent, nil
+}
+
 func worker(id int, shutdown <-chan struct{}) {
 	for {
 		select {
@@ -197,11 +225,21 @@ func worker(id int, shutdown <-chan struct{}) {
 					currentNodeID, id, job.InputPath, err)
 				updateJobStatus(jobID, currentNodeID, "failed", 0, err.Error())
 				taskCounter.WithLabelValues("failed").Inc()
+				// 新增：节点级别失败计数
+				statsMu.Lock()
+				nodeFailedCount++
+				nodeTaskCounter.WithLabelValues(currentNodeID, "failed").Inc()
+				statsMu.Unlock()
 			} else {
 				log.Printf("[Node %s][Worker %d] Completed: %s in %v",
 					currentNodeID, id, job.InputPath, time.Duration(duration*1e9))
 				updateJobStatus(jobID, currentNodeID, "completed", 100, "")
 				taskCounter.WithLabelValues("completed").Inc()
+				// 新增：节点级别完成计数
+				statsMu.Lock()
+				nodeCompletedCount++
+				nodeTaskCounter.WithLabelValues(currentNodeID, "completed").Inc()
+				statsMu.Unlock()
 				durationHist.Observe(duration)
 			}
 
@@ -219,6 +257,8 @@ func StartConsumer(shutdown <-chan struct{}) {
 		currentNodeID, *maxWorkers, *topic, *groupID)
 
 	go startHeartbeat()
+	// 删除：启动系统指标采集（已移除，改为按需查询）
+	// go startMetricsCollector()
 
 	for i := 0; i < *maxWorkers; i++ {
 		go worker(i, shutdown)

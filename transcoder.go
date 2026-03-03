@@ -179,14 +179,23 @@ func generateProbeTS(inputPath, profile, outputPath string) error {
 
 // transcodeFull 转码单个档位（全量，含音频，带超时控制）
 func transcodeFull(ctx context.Context, inputPath, profile, jobID string, crf int) error {
-	outputDir := "./output_path"
+	// 使用绝对路径
+	// 使用环境变量或默认当前目录下的 output_path
+	outputDir := os.Getenv("TRANSCODE_OUTPUT_DIR")
+	if outputDir == "" {
+		outputDir = "./output_path"
+	}
+	absOutputDir, err := filepath.Abs(outputDir)
+	if err != nil {
+		return fmt.Errorf("resolve output dir: %w", err)
+	}
 	hlsTime := 4
 
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
 
-	segmentTemplate := filepath.Join(outputDir, fmt.Sprintf("%s_%s_seg_%%03d.ts", jobID, profile))
-	finalM3U8 := filepath.Join(outputDir, fmt.Sprintf("%s_%s.m3u8", jobID, profile))
+	segmentTemplate := filepath.Join(absOutputDir, fmt.Sprintf("%s_%s_seg_%%03d.ts", jobID, profile))
+	finalM3U8 := filepath.Join(absOutputDir, fmt.Sprintf("%s_%s.m3u8", jobID, profile))
 
 	audioBitrate := getAudioBitrate(profile)
 
@@ -233,13 +242,22 @@ func transcodeFull(ctx context.Context, inputPath, profile, jobID string, crf in
 
 // generateMasterPlaylist 生成主播放列表（自适应码率切换）
 func generateMasterPlaylist(profiles []string, jobID string) error {
-	outputDir := "./output_path"
-	masterPath := filepath.Join(outputDir, fmt.Sprintf("%s.m3u8", jobID))
+	// 使用环境变量或默认当前目录下的 output_path
+	outputDir := os.Getenv("TRANSCODE_OUTPUT_DIR")
+	if outputDir == "" {
+		outputDir = "./output_path"
+	}
+	absOutputDir, err := filepath.Abs(outputDir)
+	if err != nil {
+		return fmt.Errorf("resolve output dir: %w", err)
+	}
+	masterPath := filepath.Join(absOutputDir, fmt.Sprintf("%s.m3u8", jobID))
 
 	file, err := os.Create(masterPath)
 	if err != nil {
 		return fmt.Errorf("create master playlist: %w", err)
 	}
+	
 	defer file.Close()
 
 	// 写入 HLS 头部
@@ -289,8 +307,16 @@ func Transcode(inputURL string, profiles []string, jobID string) error {
 		return fmt.Errorf("profiles cannot be empty")
 	}
 
-	outputDir := "./output_path"
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
+	// 使用环境变量或默认当前目录下的 output_path
+	outputDir := os.Getenv("TRANSCODE_OUTPUT_DIR")
+	if outputDir == "" {
+		outputDir = "./output_path"
+	}
+	absOutputDir, err := filepath.Abs(outputDir)
+	if err != nil {
+		return fmt.Errorf("resolve output dir: %w", err)
+	}
+	if err := os.MkdirAll(absOutputDir, 0755); err != nil {
 		return fmt.Errorf("create output dir: %w", err)
 	}
 
@@ -299,12 +325,12 @@ func Transcode(inputURL string, profiles []string, jobID string) error {
 	fmt.Printf("→ Main profile selected: %s\n", mainProfile)
 
 	// Step 2: 生成 CQP 探针（仅视频，-qp 23）
-	probeTS := filepath.Join(outputDir, fmt.Sprintf("temp_probe_%s.ts", jobID))
+	probeTS := filepath.Join(absOutputDir, fmt.Sprintf("temp_probe_%s.ts", jobID))
 	if err := generateProbeTS(absInput, mainProfile, probeTS); err != nil {
 		return fmt.Errorf("generate CQP probe: %w", err)
 	}
 	defer func() {
-    _ = os.Remove(probeTS) // 忽略“文件不存在”错误
+    _ = os.Remove(probeTS) // 忽略"文件不存在"错误
 	}()
 
 	// Step 3: 分析复杂度 → 基础 CRF（使用主档位的参考值）

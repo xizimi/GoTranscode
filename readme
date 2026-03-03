@@ -1,1 +1,5 @@
 curl -X POST http://localhost:8078/transcode -H "Content-Type: application/json" -d '{"input_path":"/home/zhaobowen/project/go_project/GoTranscode/video_path/2.mp4","output_profiles":["720p"]}'
+curl -X POST http://localhost:8078/transcode -H "Content-Type: application/json" -d '{"input_path":"/home/zhaobowen/project/go_project/GoTranscode/video_path/2.mp4","output_profiles":["360p"]}'
+curl -X POST http://localhost:8078/transcode -H "Content-Type: application/json" -d '{"input_path":"/home/zhaobowen/project/go_project/GoTranscode/video_path/2.mp4","output_profiles":["640p"]}'
+go run . -node-id="api-node"  -enable-api=true -kafka-brokers=localhost:9092 -redis-addr=localhost:6379
+go run . -node-id="ndoe-1"  -enable-api=false -kafka-brokers=localhost:9092 -redis-addr=localhost:6379

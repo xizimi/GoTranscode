@@ -23,7 +23,7 @@ var (
 	topic          = flag.String("topic", "transcode-jobs", "Kafka topic")
 	groupID        = flag.String("group", "gotranscode-group-v1", "Consumer group ID")
 
-	// 【关键】不再在 init 中赋值，移到 main()
+
 	currentNodeID string
 
 	// 全局变量
@@ -37,7 +37,7 @@ var (
 	closeOnce      sync.Once
 	shutdownChan   chan struct{}
 	
-	// 新增：节点任务统计
+	// 节点任务统计
 	nodeCompletedCount int
 	nodeFailedCount    int
 	statsMu            sync.Mutex
@@ -225,7 +225,7 @@ func worker(id int, shutdown <-chan struct{}) {
 					currentNodeID, id, job.InputPath, err)
 				updateJobStatus(jobID, currentNodeID, "failed", 0, err.Error())
 				taskCounter.WithLabelValues("failed").Inc()
-				// 新增：节点级别失败计数
+				// 节点级别失败计数
 				statsMu.Lock()
 				nodeFailedCount++
 				nodeTaskCounter.WithLabelValues(currentNodeID, "failed").Inc()
@@ -257,7 +257,6 @@ func StartConsumer(shutdown <-chan struct{}) {
 		currentNodeID, *maxWorkers, *topic, *groupID)
 
 	go startHeartbeat()
-	// 删除：启动系统指标采集（已移除，改为按需查询）
 	// go startMetricsCollector()
 
 	for i := 0; i < *maxWorkers; i++ {

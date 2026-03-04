@@ -320,11 +320,11 @@ func Transcode(inputURL string, profiles []string, jobID string) error {
 		return fmt.Errorf("create output dir: %w", err)
 	}
 
-	// Step 1: 确定主档位（最高清）
+	// 确定主档位（最高清）
 	mainProfile := getHighestProfile(profiles)
 	fmt.Printf("→ Main profile selected: %s\n", mainProfile)
 
-	// Step 2: 生成 CQP 探针（仅视频，-qp 23）
+	//  生成 CQP 探针（仅视频，-qp 23）
 	probeTS := filepath.Join(absOutputDir, fmt.Sprintf("temp_probe_%s.ts", jobID))
 	if err := generateProbeTS(absInput, mainProfile, probeTS); err != nil {
 		return fmt.Errorf("generate CQP probe: %w", err)
@@ -333,7 +333,7 @@ func Transcode(inputURL string, profiles []string, jobID string) error {
     _ = os.Remove(probeTS) // 忽略"文件不存在"错误
 	}()
 
-	// Step 3: 分析复杂度 → 基础 CRF（使用主档位的参考值）
+	// 分析复杂度 → 基础 CRF（使用主档位的参考值）
 	complexity, err := analyzeComplexityFromSize(probeTS, mainProfile)
 	if err != nil {
 		fmt.Printf("⚠️ Probe analysis failed, using default CRF=23: %v\n", err)
@@ -342,7 +342,7 @@ func Transcode(inputURL string, profiles []string, jobID string) error {
 	baseCRF := crfFromComplexity(complexity)
 	fmt.Printf("→ Complexity=%.2f → Base CRF=%d\n", complexity, baseCRF)
 
-	// Step 4: 为每个档位全量转码（含音频）
+	//为每个档位全量转码（含音频）
 	ctx := context.Background()
 	for _, profile := range profiles {
 		finalCRF := baseCRF + crfOffset(profile)
@@ -357,11 +357,11 @@ func Transcode(inputURL string, profiles []string, jobID string) error {
 		}
 	}
 
-	// Step 5: 生成 Master Playlist
+	//  生成 Master Playlist
 	if err := generateMasterPlaylist(profiles, jobID); err != nil {
 		return fmt.Errorf("generate master playlist: %w", err)
 	}
 
-	fmt.Printf("✅ Transcode completed: %s.m3u8\n", jobID)
+	fmt.Printf("Transcode completed: %s.m3u8\n", jobID)
 	return nil
 }

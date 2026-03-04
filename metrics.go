@@ -11,7 +11,7 @@ var (
 		[]string{"status"},
 	)
 	
-	// 新增：节点级别的任务统计
+
 	nodeTaskCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "node_transcode_tasks_total",
@@ -20,7 +20,7 @@ var (
 		[]string{"node_id", "status"}, // status: completed/failed
 	)
 	
-	// 新增：Kafka 队列待处理任务数
+	// Kafka 队列待处理任务数
 	kafkaQueueLength = prometheus.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "kafka_queue_pending_tasks",
@@ -28,7 +28,7 @@ var (
 		},
 	)
 	
-	// 新增：节点 CPU 使用率
+	// 节点 CPU 使用率
 	nodeCPUUsage = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "node_cpu_usage_percent",
@@ -37,7 +37,7 @@ var (
 		[]string{"node_id"},
 	)
 	
-	// 新增：节点内存使用率
+	// 节点内存使用率
 	nodeMemoryUsage = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "node_memory_usage_percent",

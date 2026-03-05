@@ -1,46 +1,15 @@
 package main
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"log"
-	"sync"
 	"time"
 
-	"github.com/segmentio/kafka-go"
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/mem"
-)
-
-var (
-	// 命令行参数定义 (保持指针类型)
-	// nodeIDFlag     = flag.String("node", "1", "Node ID for this instance")
-	maxWorkers     = flag.Int("workers", 4, "Number of concurrent workers")
-	topic          = flag.String("topic", "transcode-jobs", "Kafka topic")
-	groupID        = flag.String("group", "gotranscode-group-v1", "Consumer group ID")
-
-
-	currentNodeID string
-
-	// 全局变量
-	kafkaWriter *kafka.Writer
-	kafkaReader *kafka.Reader
-	jobQueue    chan Job
-
-	// 本地负载计数器 + 关闭控制
-	localLoadCount int
-	loadMu         sync.Mutex
-	closeOnce      sync.Once
-	shutdownChan   chan struct{}
-	
-	// 节点任务统计
-	nodeCompletedCount int
-	nodeFailedCount    int
-	statsMu            sync.Mutex
 )
 
 type Job struct {
@@ -48,6 +17,7 @@ type Job struct {
 	OutputProfiles []string `json:"output_profiles"`
 	JobID          string   `json:"job_id,omitempty"`
 	NodeID         string   `json:"node_id,omitempty"`
+	IsVIP          bool     `json:"is_vip,omitempty"` // 新增：VIP 任务标识
 }
 
 type JobStatus struct {
@@ -59,12 +29,17 @@ type JobStatus struct {
 	StartTime  time.Time `json:"start_time"`
 	EndTime    time.Time `json:"end_time,omitempty"`
 	ErrorMsg   string    `json:"error_msg,omitempty"`
+	RetryCount int       `json:"retry_count,omitempty"` // 新增：重试次数
 }
 
 func generateJobID(inputPath string) string {
 	timestamp := time.Now().UnixNano()
 	random := make([]byte, 4)
-	rand.Read(random)
+	_, err := rand.Read(random)
+	if err != nil {
+		// fallback to timestamp only
+		return fmt.Sprintf("%s_%d", currentNodeID, timestamp)
+	}
 	return fmt.Sprintf("%s_%d_%s",
 		currentNodeID,
 		timestamp,
@@ -72,72 +47,39 @@ func generateJobID(inputPath string) string {
 	)
 }
 
-func InitKafka(brokerList []string) {
-	transport := &kafka.Transport{
-		DialTimeout: 10 * time.Second,
-	}
-
-	kafkaWriter = &kafka.Writer{
-		Addr:      kafka.TCP(brokerList...),
-		Topic:     *topic,
-		Balancer:  &kafka.LeastBytes{},
-		Transport: transport,
-	}
-
-	kafkaReader = kafka.NewReader(kafka.ReaderConfig{
-		Brokers:        brokerList,
-		Topic:          *topic,
-		GroupID:        *groupID,
-		CommitInterval: 5 * time.Second,
-		Dialer: &kafka.Dialer{
-			Timeout:   10 * time.Second,
-			DualStack: false,
-		},
-	})
-}
-
-func AddJob(job Job) (string, error) {
-	if job.JobID == "" {
-		job.JobID = generateJobID(job.InputPath)
-	}
-
-	jobBytes, err := json.Marshal(job)
-	if err != nil {
-		return "", fmt.Errorf("marshal job: %w", err)
-	}
-
-	err = kafkaWriter.WriteMessages(context.Background(), kafka.Message{
-		Key:   []byte(job.JobID),
-		Value: jobBytes,
-	})
-	if err != nil {
-		return "", fmt.Errorf("write kafka message: %w", err)
-	}
-
-	return job.JobID, nil
-}
-
-// updateJobStatus 重写：写入 Redis
+// updateJobStatus 更新任务状态到 Redis
 func updateJobStatus(jobID, nID, status string, progress float64, errMsg string) {
 	var startTime time.Time
 	var inputPath string
+	var retryCount int
 
 	oldStatus, _ := GetJobStatusFromRedis(jobID)
 	if oldStatus != nil {
 		startTime = oldStatus.StartTime
 		inputPath = oldStatus.InputPath
+		retryCount = oldStatus.RetryCount
 	} else {
 		startTime = time.Now()
+		// 尝试从 jobRetryInfo 获取 inputPath（如果存在）
+		if info, ok := jobRetryInfo.Load(jobID); ok {
+			if rInfo, ok := info.(*RetryInfo); ok {
+				var jobMsg JobMessage
+				if err := json.Unmarshal(rInfo.Body, &jobMsg); err == nil {
+					inputPath = jobMsg.InputPath
+				}
+			}
+		}
 	}
 
 	js := &JobStatus{
-		JobID:     jobID,
-		NodeID:    nID,
-		Status:    status,
-		Progress:  progress,
-		ErrorMsg:  errMsg,
-		StartTime: startTime,
-		InputPath: inputPath,
+		JobID:      jobID,
+		NodeID:     nID,
+		Status:     status,
+		Progress:   progress,
+		ErrorMsg:   errMsg,
+		StartTime:  startTime,
+		InputPath:  inputPath,
+		RetryCount: retryCount,
 	}
 
 	if status == "completed" || status == "failed" {
@@ -165,7 +107,7 @@ func startHeartbeat() {
 	}
 }
 
-// 新增：采集系统资源使用率
+// 采集系统资源使用率
 func collectSystemMetrics() (cpuPercent float64, memPercent float64, err error) {
 	// 获取 CPU 使用率
 	cpuPercentages, err := cpu.Percent(time.Second, false)
@@ -203,6 +145,7 @@ func worker(id int, shutdown <-chan struct{}) {
 				jobID = generateJobID(job.InputPath)
 			}
 
+			// 设置 NodeID（唯一设置点）
 			job.NodeID = currentNodeID
 
 			loadMu.Lock()
@@ -210,10 +153,31 @@ func worker(id int, shutdown <-chan struct{}) {
 			loadMu.Unlock()
 
 			AddJobToNode(currentNodeID, jobID)
+			
+			// 获取重试次数
+			retryCount := 0
+			isRetry := false
+			if info, ok := jobRetryInfo.Load(jobID); ok {
+				if rInfo, ok := info.(*RetryInfo); ok {
+					retryCount = rInfo.RetryCount
+					if retryCount > 0 {
+						isRetry = true
+					}
+				}
+			}
 			updateJobStatus(jobID, currentNodeID, "running", 0, "")
 
-			log.Printf("[Node %s][Worker %d] Start: %s (jobID: %s)",
-				currentNodeID, id, job.InputPath, jobID)
+			vipTag := ""
+			if job.IsVIP {
+				vipTag = "[VIP] "
+			}
+			log.Printf("[Node %s][Worker %d] %sStart: %s (jobID: %s, retry: %d)",
+				currentNodeID, id, vipTag, job.InputPath, jobID, retryCount)
+
+			// 修复：如果是重试任务，更新重试指标
+			if isRetry {
+				UpdateTaskRetryMetrics(retryCount)
+			}
 
 			start := time.Now()
 			err := Transcode(job.InputPath, job.OutputProfiles, jobID)
@@ -223,9 +187,19 @@ func worker(id int, shutdown <-chan struct{}) {
 			if err != nil {
 				log.Printf("[Node %s][Worker %d] Failed: %s, error: %v",
 					currentNodeID, id, job.InputPath, err)
+				
+				// 处理失败：触发死信队列重试
+				if info, ok := jobRetryInfo.Load(jobID); ok {
+					if rInfo, ok := info.(*RetryInfo); ok {
+						if requeueErr := RequeueFailedJob(jobID, rInfo.Body, rInfo.RetryCount); requeueErr != nil {
+							log.Printf("[Node %s] Failed to requeue job %s: %v", currentNodeID, jobID, requeueErr)
+						}
+					}
+				}
+				// 修复：延迟删除，确保 RequeueFailedJob 能获取到重试信息
+				
 				updateJobStatus(jobID, currentNodeID, "failed", 0, err.Error())
 				taskCounter.WithLabelValues("failed").Inc()
-				// 节点级别失败计数
 				statsMu.Lock()
 				nodeFailedCount++
 				nodeTaskCounter.WithLabelValues(currentNodeID, "failed").Inc()
@@ -233,9 +207,9 @@ func worker(id int, shutdown <-chan struct{}) {
 			} else {
 				log.Printf("[Node %s][Worker %d] Completed: %s in %v",
 					currentNodeID, id, job.InputPath, time.Duration(duration*1e9))
+				jobRetryInfo.Delete(jobID)
 				updateJobStatus(jobID, currentNodeID, "completed", 100, "")
 				taskCounter.WithLabelValues("completed").Inc()
-				// 新增：节点级别完成计数
 				statsMu.Lock()
 				nodeCompletedCount++
 				nodeTaskCounter.WithLabelValues(currentNodeID, "completed").Inc()
@@ -253,55 +227,22 @@ func worker(id int, shutdown <-chan struct{}) {
 }
 
 func StartConsumer(shutdown <-chan struct{}) {
-	log.Printf("Starting Node %s with %d workers, topic: %s, group: %s",
-		currentNodeID, *maxWorkers, *topic, *groupID)
+	log.Printf("Starting Node %s with %d workers", currentNodeID, *maxWorkers)
 
 	go startHeartbeat()
-	// go startMetricsCollector()
+
+	// 初始化 RabbitMQ 消费者
+	if err := ConsumeJobs(shutdown, jobQueue); err != nil {
+		log.Fatalf("[Node %s] Failed to start RabbitMQ consumer: %v", currentNodeID, err)
+	}
 
 	for i := 0; i < *maxWorkers; i++ {
 		go worker(i, shutdown)
 	}
 
-	for {
-		select {
-		case <-shutdown:
-			log.Printf("[Node %s] Shutdown signal received, stopping consumer", currentNodeID)
-			return
-		default:
-			msg, err := kafkaReader.ReadMessage(context.Background())
-
-			if err != nil {
-				if err == context.Canceled {
-					log.Printf("[Node %s] Context canceled, exiting", currentNodeID)
-					return
-				}
-				log.Printf("[Node %s] Kafka error: %v", currentNodeID, err)
-				time.Sleep(time.Second)
-				continue
-			}
-
-			var job Job
-			if err := json.Unmarshal(msg.Value, &job); err != nil {
-				log.Printf("[Node %s] Invalid job JSON: %s", currentNodeID, string(msg.Value))
-				continue
-			}
-
-			if job.JobID == "" {
-				job.JobID = generateJobID(job.InputPath)
-			}
-
-			updateJobStatus(job.JobID, currentNodeID, "pending", 0, "")
-
-			select {
-			case jobQueue <- job:
-				log.Printf("[Node %s] Job queued: %s (jobID: %s)",
-					currentNodeID, job.InputPath, job.JobID)
-			case <-shutdown:
-				return
-			}
-		}
-	}
+	// 等待关闭信号
+	<-shutdown
+	log.Printf("[Node %s] Consumer stopped", currentNodeID)
 }
 
 // GracefulShutdown 优雅关闭所有资源
@@ -309,18 +250,15 @@ func GracefulShutdown() {
 	closeOnce.Do(func() {
 		close(shutdownChan)
 		
-		// 等待 5 秒让 worker 处理完当前任务
+		// 等待 worker 处理完当前任务
 		time.Sleep(2 * time.Second)
 		
 		// 关闭 jobQueue
 		close(jobQueue)
 		
-		// 关闭 Kafka 连接
-		if kafkaWriter != nil {
-			kafkaWriter.Close()
-		}
-		if kafkaReader != nil {
-			kafkaReader.Close()
+		// 关闭 RabbitMQ 连接
+		if err := CloseRabbitMQ(); err != nil {
+			log.Printf("Error closing RabbitMQ: %v", err)
 		}
 		
 		// 关闭 Redis

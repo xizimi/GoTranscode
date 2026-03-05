@@ -47,8 +47,8 @@ func UpdateJobStatusInRedis(status *JobStatus) error {
 	pipe.HSet(ctx, key, "data", string(data))
 	pipe.HSet(ctx, key, "status", status.Status)
 	pipe.HSet(ctx, key, "node_id", status.NodeID)
-	pipe.HSet(ctx, key, "progress", status.Progress)
-	pipe.HSet(ctx, key, "updated_at", time.Now().Unix())
+	pipe.HSet(ctx, key, "progress", fmt.Sprintf("%f", status.Progress))
+	pipe.HSet(ctx, key, "updated_at", fmt.Sprintf("%d", time.Now().Unix()))
 
 	if status.Status == "completed" || status.Status == "failed" {
 		pipe.Expire(ctx, key, 24*time.Hour)
@@ -79,13 +79,13 @@ func GetJobStatusFromRedis(jobID string) (*JobStatus, error) {
 func ReportNodeHeartbeat(nodeID string, currentLoad int) error {
 	nodeKey := keyNodePrefix + nodeID
 	
-	// 新增：获取节点任务统计
+	// 获取节点任务统计
 	statsMu.Lock()
 	completedCount := nodeCompletedCount
 	failedCount := nodeFailedCount
 	statsMu.Unlock()
 	
-	// 新增：采集系统资源（用于 Redis 存储，不打印日志）
+	// 采集系统资源（用于 Redis 存储，不打印日志）
 	cpuPercent, memPercent, _ := collectSystemMetrics()
 
 	info := map[string]interface{}{

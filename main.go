@@ -6,26 +6,47 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// 全局 flags
+// 全局变量 - 统一在此定义
 var (
-	nodeIDFlag    = flag.String("node-id", "node-1", "Unique ID for this transcoding node")
-	brokers       = flag.String("kafka-brokers", "localhost:9092", "Kafka bootstrap brokers (comma-separated)")
-	redisAddr     = flag.String("redis-addr", "localhost:6379", "Redis server address")
-	enableAPI     = flag.Bool("enable-api", false, "Enable HTTP API server (only one node should set this to true)")
+	currentNodeID string
+	jobQueue      chan Job
+	shutdownChan  chan struct{}
+	closeOnce     sync.Once
+	
+	// 负载统计
+	loadMu          sync.Mutex
+	localLoadCount  int
+	
+	// 任务统计
+	statsMu           sync.Mutex
+	nodeCompletedCount int
+	nodeFailedCount    int
 )
 
-
+// 全局 flags - 统一在此定义
+var (
+	nodeIDFlag    = flag.String("node-id", "node-1", "Unique ID for this transcoding node")
+	rabbitAddr    = flag.String("rabbit-addr", "localhost:5672", "RabbitMQ server address")
+	rabbitUser    = flag.String("rabbit-user", "guest", "RabbitMQ username")
+	rabbitPass    = flag.String("rabbit-pass", "guest", "RabbitMQ password")
+	redisAddr     = flag.String("redis-addr", "localhost:6379", "Redis server address")
+	redisPassword = flag.String("redis-password", "", "Redis password")
+	redisDB       = flag.Int("redis-db", 0, "Redis database number")
+	enableAPI     = flag.Bool("enable-api", false, "Enable HTTP API server (only one node should set this to true)")
+	maxWorkers    = flag.Int("workers", 4, "Number of concurrent workers")
+)
 
 func setupRouter() *gin.Engine {
 	r := gin.Default()
 	r.POST("/transcode", transcodeHandler)
+	r.POST("/transcode/vip", transcodeVIPHandler)
 	r.GET("/health", healthHandler)
 	r.GET("/cluster/status", clusterStatusHandler)
 	r.GET("/job/:id", jobStatusHandler)
@@ -46,16 +67,44 @@ func transcodeHandler(c *gin.Context) {
 	job := Job{
 		InputPath:      req.InputPath,
 		OutputProfiles: req.OutputProfiles,
+		IsVIP:          false,
 	}
 
-	jobID, err := AddJob(job)
+	jobID, err := PublishJob(job, false)
 	if err != nil {
-		log.Printf("Failed to add job: %v", err)
+		log.Printf("Failed to publish job: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to queue job"})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Job queued successfully", "job_id": jobID})
+}
+
+func transcodeVIPHandler(c *gin.Context) {
+	var req struct {
+		InputPath      string   `json:"input_path"`
+		OutputProfiles []string `json:"output_profiles"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	job := Job{
+		InputPath:      req.InputPath,
+		OutputProfiles: req.OutputProfiles,
+		IsVIP:          true,
+	}
+
+	jobID, err := PublishJob(job, true)
+	if err != nil {
+		log.Printf("Failed to publish VIP job: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to queue VIP job"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "VIP job queued successfully", "job_id": jobID, "priority": "high"})
 }
 
 func healthHandler(c *gin.Context) {
@@ -69,23 +118,23 @@ func clusterStatusHandler(c *gin.Context) {
 		return
 	}
 	
-	// 新增：获取 Kafka 队列长度
-	var pendingTasks int64 = 0
-	if kafkaReader != nil {
-		stats := kafkaReader.Stats()
-		pendingTasks = stats.Lag
-	}
+	// 获取 RabbitMQ 队列长度
+	var normalQueueLength, priorityQueueLength, dlxQueueLength int64 = 0, 0, 0
+	normalQueueLength, _ = GetQueueLength(queueName)
+	priorityQueueLength, _ = GetQueueLength(priorityQueueName)
+	dlxQueueLength, _ = GetQueueLength(dlxQueueName)
 	
-	// 新增：查询时实时采集系统指标（不再定时打印）
+	// 实时采集系统指标
 	cpuPercent, memPercent, _ := collectSystemMetrics()
 	
 	c.JSON(http.StatusOK, gin.H{
-		"total_nodes":           len(nodes),
-		"nodes":                 nodes,
-		"kafka_pending_tasks":   pendingTasks,
-		// 新增：实时系统指标（仅查询时返回）
-		"current_cpu_usage":     cpuPercent,
-		"current_memory_usage":  memPercent,
+		"total_nodes":            len(nodes),
+		"nodes":                  nodes,
+		"rabbitmq_normal_queue":  normalQueueLength,
+		"rabbitmq_priority_queue": priorityQueueLength,
+		"rabbitmq_dlx_queue":     dlxQueueLength,
+		"current_cpu_usage":      cpuPercent,
+		"current_memory_usage":   memPercent,
 	})
 }
 
@@ -113,11 +162,13 @@ func main() {
 
 	shutdownChan = make(chan struct{})
 
-	// 1. 初始化 Kafka
-	InitKafka(strings.Split(*brokers, ","))
+	// 1. 初始化 RabbitMQ
+	if err := InitRabbitMQ(*rabbitAddr, *rabbitUser, *rabbitPass); err != nil {
+		log.Fatalf("RabbitMQ init failed: %v", err)
+	}
 
 	// 2. 初始化 Redis
-	if err := InitRedis(*redisAddr, "", 0); err != nil {
+	if err := InitRedis(*redisAddr, *redisPassword, *redisDB); err != nil {
 		log.Fatalf("Redis init failed: %v", err)
 	}
 

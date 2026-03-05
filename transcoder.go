@@ -191,6 +191,7 @@ func transcodeFull(ctx context.Context, inputPath, profile, jobID string, crf in
 	}
 	hlsTime := 4
 
+	// 创建带超时的 context
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
 
@@ -199,6 +200,7 @@ func transcodeFull(ctx context.Context, inputPath, profile, jobID string, crf in
 
 	audioBitrate := getAudioBitrate(profile)
 
+	// 创建命令
 	cmd := exec.CommandContext(ctx, ffmpegPath,
 		"-y",
 		"-i", inputPath,
@@ -206,9 +208,8 @@ func transcodeFull(ctx context.Context, inputPath, profile, jobID string, crf in
 		"-c:v", "libx264",
 		"-crf", strconv.Itoa(crf),
 		"-preset", "fast",
-		// 关键帧控制：仅保留强制时间戳关键帧
-		"-force_key_frames", "expr:gte(t,n_forced*4)", // 每 4 秒强制关键帧
-		"-sc_threshold", "0",                          // 禁用场景切换检测
+		"-force_key_frames", "expr:gte(t,n_forced*4)",
+		"-sc_threshold", "0",
 		"-profile:v", "main",
 		"-c:a", "aac",
 		"-b:a", audioBitrate,
@@ -220,21 +221,12 @@ func transcodeFull(ctx context.Context, inputPath, profile, jobID string, crf in
 		finalM3U8,
 	)
 
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return err
-	}
-
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-
-	errMsg, _ := io.ReadAll(stderr)
-	if waitErr := cmd.Wait(); waitErr != nil {
+	// 执行命令并等待完成
+	if err := cmd.Run(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return fmt.Errorf("transcode timeout: %w", waitErr)
+			return fmt.Errorf("transcode timeout: %w", err)
 		}
-		return fmt.Errorf("ffmpeg failed: %s", string(errMsg))
+		return fmt.Errorf("ffmpeg failed: %w", err)
 	}
 
 	return nil

@@ -30,9 +30,10 @@ var (
 	nodeFailedCount    int
 )
 
-// 全局 flags - 统一在此定义
+// 全局 flags
 var (
 	nodeIDFlag    = flag.String("node-id", "node-1", "Unique ID for this transcoding node")
+	nodeGroup     = flag.String("node-group", "all", "Node group: normal/priority/all") // 新增：节点分组
 	rabbitAddr    = flag.String("rabbit-addr", "localhost:5672", "RabbitMQ server address")
 	rabbitUser    = flag.String("rabbit-user", "guest", "RabbitMQ username")
 	rabbitPass    = flag.String("rabbit-pass", "guest", "RabbitMQ password")
@@ -118,23 +119,32 @@ func clusterStatusHandler(c *gin.Context) {
 		return
 	}
 	
-	// 获取 RabbitMQ 队列长度
-	var normalQueueLength, priorityQueueLength, dlxQueueLength int64 = 0, 0, 0
-	normalQueueLength, _ = GetQueueLength(queueName)
-	priorityQueueLength, _ = GetQueueLength(priorityQueueName)
-	dlxQueueLength, _ = GetQueueLength(dlxQueueName)
+	// 获取 RabbitMQ 各队列组长度
+	queueGroups := map[string]map[string]int64{
+		"normal": {
+			"main": 0,
+			"dlx":  0,
+		},
+		"priority": {
+			"main": 0,
+			"dlx":  0,
+		},
+	}
+	
+	queueGroups["normal"]["main"], _ = GetQueueLength(queueName)
+	queueGroups["normal"]["dlx"], _ = GetQueueLength(dlxQueueName)
+	queueGroups["priority"]["main"], _ = GetQueueLength(priorityQueueName)
+	queueGroups["priority"]["dlx"], _ = GetQueueLength(priorityDlxQueueName)
 	
 	// 实时采集系统指标
 	cpuPercent, memPercent, _ := collectSystemMetrics()
 	
 	c.JSON(http.StatusOK, gin.H{
-		"total_nodes":            len(nodes),
-		"nodes":                  nodes,
-		"rabbitmq_normal_queue":  normalQueueLength,
-		"rabbitmq_priority_queue": priorityQueueLength,
-		"rabbitmq_dlx_queue":     dlxQueueLength,
-		"current_cpu_usage":      cpuPercent,
-		"current_memory_usage":   memPercent,
+		"total_nodes":         len(nodes),
+		"nodes":               nodes,
+		"queue_groups":        queueGroups,
+		"current_cpu_usage":   cpuPercent,
+		"current_memory_usage": memPercent,
 	})
 }
 
@@ -156,9 +166,14 @@ func main() {
 	flag.Parse()
 
 	currentNodeID = *nodeIDFlag
+	
+	// 验证节点分组参数
+	if *nodeGroup != "normal" && *nodeGroup != "priority" && *nodeGroup != "all" {
+		log.Fatalf("Invalid node-group: %s, must be normal/priority/all", *nodeGroup)
+	}
 
 	jobQueue = make(chan Job, *maxWorkers*2)
-	log.Printf("Initialized Node: %s with jobQueue capacity: %d", currentNodeID, *maxWorkers*2)
+	log.Printf("Initialized Node: %s (group: %s) with jobQueue capacity: %d", currentNodeID, *nodeGroup, *maxWorkers*2)
 
 	shutdownChan = make(chan struct{})
 
@@ -172,7 +187,7 @@ func main() {
 		log.Fatalf("Redis init failed: %v", err)
 	}
 
-	// 3. 启动消费者（所有节点都启动）
+	// 3. 启动消费者（所有节点都启动，但根据分组消费不同队列）
 	go StartConsumer(shutdownChan)
 
 	// 4. 仅当 enable-api=true 时启动 HTTP API 和 Metrics

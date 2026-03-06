@@ -154,21 +154,24 @@ func worker(id int, shutdown <-chan struct{}) {
 
 			AddJobToNode(currentNodeID, jobID)
 			
-			// 获取重试次数
+			// 获取重试次数和任务类型
 			retryCount := 0
 			isRetry := false
+			isVIP := job.IsVIP
 			if info, ok := jobRetryInfo.Load(jobID); ok {
 				if rInfo, ok := info.(*RetryInfo); ok {
 					retryCount = rInfo.RetryCount
 					if retryCount > 0 {
 						isRetry = true
 					}
+					// 修复：从 RetryInfo 获取正确的 IsVIP 标识
+					isVIP = rInfo.IsVIP
 				}
 			}
 			updateJobStatus(jobID, currentNodeID, "running", 0, "")
 
 			vipTag := ""
-			if job.IsVIP {
+			if isVIP {
 				vipTag = "[VIP] "
 			}
 			log.Printf("[Node %s][Worker %d] %sStart: %s (jobID: %s, retry: %d)",
@@ -184,6 +187,12 @@ func worker(id int, shutdown <-chan struct{}) {
 
 			duration := time.Since(start).Seconds()
 
+			// 确定队列组用于指标统计
+			queueGroup := "normal"
+			if isVIP {
+				queueGroup = "priority"
+			}
+
 			if err != nil {
 				log.Printf("[Node %s][Worker %d] Failed: %s, error: %v",
 					currentNodeID, id, job.InputPath, err)
@@ -191,15 +200,17 @@ func worker(id int, shutdown <-chan struct{}) {
 				// 处理失败：触发死信队列重试
 				if info, ok := jobRetryInfo.Load(jobID); ok {
 					if rInfo, ok := info.(*RetryInfo); ok {
-						if requeueErr := RequeueFailedJob(jobID, rInfo.Body, rInfo.RetryCount); requeueErr != nil {
+						// 修复：传递 isVIP 参数
+						if requeueErr := RequeueFailedJob(jobID, rInfo.Body, rInfo.RetryCount, rInfo.IsVIP); requeueErr != nil {
 							log.Printf("[Node %s] Failed to requeue job %s: %v", currentNodeID, jobID, requeueErr)
 						}
 					}
 				}
-				// 修复：延迟删除，确保 RequeueFailedJob 能获取到重试信息
 				
 				updateJobStatus(jobID, currentNodeID, "failed", 0, err.Error())
 				taskCounter.WithLabelValues("failed").Inc()
+				// 修复：更新节点队列组指标
+				UpdateNodeQueueGroupMetrics(currentNodeID, queueGroup, "failed")
 				statsMu.Lock()
 				nodeFailedCount++
 				nodeTaskCounter.WithLabelValues(currentNodeID, "failed").Inc()
@@ -210,6 +221,8 @@ func worker(id int, shutdown <-chan struct{}) {
 				jobRetryInfo.Delete(jobID)
 				updateJobStatus(jobID, currentNodeID, "completed", 100, "")
 				taskCounter.WithLabelValues("completed").Inc()
+				// 修复：更新节点队列组指标
+				UpdateNodeQueueGroupMetrics(currentNodeID, queueGroup, "completed")
 				statsMu.Lock()
 				nodeCompletedCount++
 				nodeTaskCounter.WithLabelValues(currentNodeID, "completed").Inc()

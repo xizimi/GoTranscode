@@ -88,14 +88,35 @@ func ReportNodeHeartbeat(nodeID string, currentLoad int) error {
 	// 采集系统资源（用于 Redis 存储，不打印日志）
 	cpuPercent, memPercent, _ := collectSystemMetrics()
 
+	// 获取各队列组当前负载
+	normalMainLen, _ := GetQueueLength(queueName)
+	normalDlxLen, _ := GetQueueLength(dlxQueueName)
+	priorityMainLen, _ := GetQueueLength(priorityQueueName)
+	priorityDlxLen, _ := GetQueueLength(priorityDlxQueueName)
+
 	info := map[string]interface{}{
-		"last_heartbeat":       time.Now().Format(time.RFC3339),
-		"load":                 currentLoad,
-		"status":               "online",
-		"completed_tasks":      completedCount,
-		"failed_tasks":         failedCount,
-		"cpu_usage_percent":    cpuPercent,
-		"memory_usage_percent": memPercent,
+		"last_heartbeat":        time.Now().Format(time.RFC3339),
+		"load":                  currentLoad,
+		"status":                "online",
+		"completed_tasks":       completedCount,
+		"failed_tasks":          failedCount,
+		"cpu_usage_percent":     cpuPercent,
+		"memory_usage_percent":  memPercent,
+		// 修复：队列组监控信息，支持按组隔离监控
+		"queue_group_lengths": map[string]map[string]int64{
+			"normal": {
+				"main": normalMainLen,
+				"dlx":  normalDlxLen,
+			},
+			"priority": {
+				"main": priorityMainLen,
+				"dlx":  priorityDlxLen,
+			},
+		},
+		// 新增：节点 ID 用于区分不同节点
+		"node_id": nodeID,
+		// 新增：节点分组信息
+		"node_group":            currentNodeGroup,
 	}
 
 	data, _ := json.Marshal(info)

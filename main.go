@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -51,6 +52,7 @@ func setupRouter() *gin.Engine {
 	r.GET("/health", healthHandler)
 	r.GET("/cluster/status", clusterStatusHandler)
 	r.GET("/job/:id", jobStatusHandler)
+	r.GET("/jobs", allJobStatusHandler)
 	return r
 }
 
@@ -159,7 +161,77 @@ func jobStatusHandler(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "job not found"})
 		return
 	}
-	c.JSON(http.StatusOK, status)
+	
+	// 计算持续时间
+	duration := ""
+	if !status.StartTime.IsZero() {
+		if status.EndTime.IsZero() {
+			duration = time.Since(status.StartTime).String()
+		} else {
+			duration = status.EndTime.Sub(status.StartTime).String()
+		}
+	}
+	
+	// 构造响应
+	response := gin.H{
+		"job_id":       status.JobID,
+		"input_path":   status.InputPath,
+		"node_id":      status.NodeID,
+		"status":       status.Status,
+		"progress":     status.Progress,
+		"start_time":   status.StartTime,
+		"end_time":     status.EndTime,
+		"duration":     duration,
+		"error_msg":    status.ErrorMsg,
+		"retry_count":  status.RetryCount,
+	}
+	
+	c.JSON(http.StatusOK, response)
+}
+
+// allJobStatusHandler 查询所有任务状态
+func allJobStatusHandler(c *gin.Context) {
+	statuses, err := GetAllJobStatusesFromRedis()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	
+	// 构造响应列表
+	result := make([]gin.H, 0, len(statuses))
+	for _, status := range statuses {
+		// 计算持续时间
+		duration := ""
+		if !status.StartTime.IsZero() {
+			if status.EndTime.IsZero() {
+				duration = time.Since(status.StartTime).String()
+			} else {
+				duration = status.EndTime.Sub(status.StartTime).String()
+			}
+		}
+		
+		// 判断成功与否
+		success := status.Status == "completed"
+		
+		result = append(result, gin.H{
+			"job_id":       status.JobID,
+			"input_path":   status.InputPath,
+			"node_id":      status.NodeID,
+			"status":       status.Status,
+			"progress":     status.Progress,
+			"start_time":   status.StartTime,
+			"end_time":     status.EndTime,
+			"duration":     duration,
+			"error_msg":    status.ErrorMsg,
+			"retry_count":  status.RetryCount,
+			"success":      success,
+		})
+	}
+	
+	c.JSON(http.StatusOK, gin.H{
+		"total": len(result),
+		"jobs":  result,
+	})
 }
 
 func main() {

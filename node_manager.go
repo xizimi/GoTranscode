@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -174,4 +175,84 @@ func GetAllActiveNodes() ([]map[string]interface{}, error) {
 	}
 
 	return activeNodes, nil
+}
+
+// GetAllJobStatusesFromRedis 获取所有任务状态
+func GetAllJobStatusesFromRedis() ([]*JobStatus, error) {
+	// 获取所有节点
+	nodes, err := rdb.SMembers(ctx, keyAllNodesSet).Result()
+	if err != nil {
+		return nil, err
+	}
+
+	// 使用 map 去重（同一个任务可能被多个节点记录）
+	jobStatusMap := make(map[string]*JobStatus)
+
+	for _, nodeID := range nodes {
+		// 获取该节点的所有任务 ID
+		jobIDs, err := rdb.SMembers(ctx, keyNodeJobsPrefix+nodeID).Result()
+		if err != nil {
+			log.Printf("Error getting jobs for node %s: %v", nodeID, err)
+			continue
+		}
+
+		for _, jobID := range jobIDs {
+			// 如果已经获取过该任务状态，跳过
+			if _, exists := jobStatusMap[jobID]; exists {
+				continue
+			}
+
+			status, err := GetJobStatusFromRedis(jobID)
+			if err != nil {
+				log.Printf("Error getting status for job %s: %v", jobID, err)
+				continue
+			}
+			if status != nil {
+				jobStatusMap[jobID] = status
+			}
+		}
+	}
+
+	// 额外扫描所有以 keyJobPrefix 开头的 key，确保不遗漏已完成/失败的任务
+	cursor := uint64(0)
+	pattern := keyJobPrefix + "*"
+	for {
+		keys, nextCursor, err := rdb.Scan(ctx, cursor, pattern, 100).Result()
+		if err != nil {
+			log.Printf("Error scanning job keys: %v", err)
+			break
+		}
+
+		for _, key := range keys {
+			// 从 key 中提取 jobID
+			jobID := strings.TrimPrefix(key, keyJobPrefix)
+			
+			// 如果已经获取过该任务状态，跳过
+			if _, exists := jobStatusMap[jobID]; exists {
+				continue
+			}
+
+			status, err := GetJobStatusFromRedis(jobID)
+			if err != nil {
+				log.Printf("Error getting status for job %s: %v", jobID, err)
+				continue
+			}
+			if status != nil {
+				jobStatusMap[jobID] = status
+			}
+		}
+
+		cursor = nextCursor
+		if cursor == 0 {
+			break
+		}
+	}
+
+	// 转换为切片
+	statuses := make([]*JobStatus, 0, len(jobStatusMap))
+	for _, status := range jobStatusMap {
+		statuses = append(statuses, status)
+	}
+
+	return statuses, nil
 }

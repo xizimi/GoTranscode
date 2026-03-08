@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -403,15 +404,20 @@ func handleMessages(msgs <-chan amqp.Delivery, shutdown <-chan struct{}, jobQueu
 
 			updateJobStatus(jobID, currentNodeID, "pending", 0, "")
 
+			// 创建完成通知通道
+			completion := make(chan TaskCompletion, 1)
+
 			select {
 			case jobQueue <- jobMsg.Job:
-				// 将原始消息体存储，用于失败时重试
+				// 将原始消息体和完成通道存储，用于任务完成后 ACK/Nack
 				jobRetryInfo.Store(jobID, &RetryInfo{
 					Body:       msg.Body,
 					RetryCount: jobMsg.RetryCount,
-					IsVIP:      isPriority, // 修复：正确设置 IsVIP 字段
+					IsVIP:      isPriority,
+					Completion: completion, // 新增：存储完成通道
 				})
-				msg.Ack(false)
+				// 启动协程等待任务完成并处理 ACK/Nack
+				go waitForTaskCompletion(msg, completion, jobID, isDLX)
 			case <-shutdown:
 				msg.Nack(false, false) // 不重新入队，避免重复消费
 				return
@@ -420,14 +426,39 @@ func handleMessages(msgs <-chan amqp.Delivery, shutdown <-chan struct{}, jobQueu
 	}
 }
 
+// TaskCompletion 任务完成通知
+type TaskCompletion struct {
+	Success bool
+	JobID   string
+}
+
 // RetryInfo 存储重试信息
 type RetryInfo struct {
 	Body       []byte
 	RetryCount int
 	IsVIP      bool
+	Completion chan TaskCompletion // 新增：任务完成通知通道
 }
 
 var jobRetryInfo sync.Map
+
+// waitForTaskCompletion 等待任务完成并处理 ACK/Nack
+func waitForTaskCompletion(msg amqp.Delivery, completion <-chan TaskCompletion, jobID string, isDLX bool) {
+	select {
+	case result := <-completion:
+		if result.Success {
+			msg.Ack(false)
+			log.Printf("[Node %s] Job %s completed successfully, message ACKed", currentNodeID, jobID)
+		} else {
+			// 任务失败，Nack 并重新入队（进入死信队列）
+			msg.Nack(false, true) // requeue=true，让消息进入死信队列
+			log.Printf("[Node %s] Job %s failed, message Nacked to DLX", currentNodeID, jobID)
+		}
+	case <-time.After(30 * time.Minute): // 超时保护
+		msg.Nack(false, false) // 超时不重新入队
+		log.Printf("[Node %s] Job %s timed out, message Nacked without requeue", currentNodeID, jobID)
+	}
+}
 
 // handleDLXMessages 处理死信队列消息（失败重试）
 func handleDLXMessages(msgs <-chan amqp.Delivery, shutdown <-chan struct{}, jobQueue chan<- Job, isPriority bool) {
@@ -459,14 +490,19 @@ func handleDLXMessages(msgs <-chan amqp.Delivery, shutdown <-chan struct{}, jobQ
 
 			updateJobStatus(jobID, currentNodeID, "pending", 0, "")
 
+			// 创建完成通知通道
+			completion := make(chan TaskCompletion, 1)
+
 			select {
 			case jobQueue <- jobMsg.Job:
 				jobRetryInfo.Store(jobID, &RetryInfo{
 					Body:       msg.Body,
 					RetryCount: jobMsg.RetryCount,
-					IsVIP:      isPriority, // 修复：正确设置 IsVIP 字段
+					IsVIP:      isPriority,
+					Completion: completion, // 新增：存储完成通道
 				})
-				msg.Ack(false)
+				// 启动协程等待任务完成并处理 ACK/Nack
+				go waitForTaskCompletion(msg, completion, jobID, true)
 			case <-shutdown:
 				msg.Nack(false, false)
 				return

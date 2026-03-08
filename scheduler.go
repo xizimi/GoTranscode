@@ -193,19 +193,17 @@ func worker(id int, shutdown <-chan struct{}) {
 				queueGroup = "priority"
 			}
 
+			// 获取完成通道并通知任务结果
+			var completion chan TaskCompletion
+			if info, ok := jobRetryInfo.Load(jobID); ok {
+				if rInfo, ok := info.(*RetryInfo); ok {
+					completion = rInfo.Completion
+				}
+			}
+
 			if err != nil {
 				log.Printf("[Node %s][Worker %d] Failed: %s, error: %v",
 					currentNodeID, id, job.InputPath, err)
-				
-				// 处理失败：触发死信队列重试
-				if info, ok := jobRetryInfo.Load(jobID); ok {
-					if rInfo, ok := info.(*RetryInfo); ok {
-						// 修复：传递 isVIP 参数
-						if requeueErr := RequeueFailedJob(jobID, rInfo.Body, rInfo.RetryCount, rInfo.IsVIP); requeueErr != nil {
-							log.Printf("[Node %s] Failed to requeue job %s: %v", currentNodeID, jobID, requeueErr)
-						}
-					}
-				}
 				
 				updateJobStatus(jobID, currentNodeID, "failed", 0, err.Error())
 				taskCounter.WithLabelValues("failed").Inc()
@@ -215,10 +213,14 @@ func worker(id int, shutdown <-chan struct{}) {
 				nodeFailedCount++
 				nodeTaskCounter.WithLabelValues(currentNodeID, "failed").Inc()
 				statsMu.Unlock()
+				
+				// 通知任务失败（触发 Nack 进入死信队列）
+				if completion != nil {
+					completion <- TaskCompletion{Success: false, JobID: jobID}
+				}
 			} else {
 				log.Printf("[Node %s][Worker %d] Completed: %s in %v",
 					currentNodeID, id, job.InputPath, time.Duration(duration*1e9))
-				jobRetryInfo.Delete(jobID)
 				updateJobStatus(jobID, currentNodeID, "completed", 100, "")
 				taskCounter.WithLabelValues("completed").Inc()
 				// 修复：更新节点队列组指标
@@ -228,6 +230,14 @@ func worker(id int, shutdown <-chan struct{}) {
 				nodeTaskCounter.WithLabelValues(currentNodeID, "completed").Inc()
 				statsMu.Unlock()
 				durationHist.Observe(duration)
+				
+				// 清理重试信息
+				jobRetryInfo.Delete(jobID)
+				
+				// 通知任务成功（触发 ACK）
+				if completion != nil {
+					completion <- TaskCompletion{Success: true, JobID: jobID}
+				}
 			}
 
 			RemoveJobFromNode(currentNodeID, jobID)

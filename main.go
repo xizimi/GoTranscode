@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/sirupsen/logrus"
 )
 
 // 全局变量 - 统一在此定义
@@ -56,6 +57,39 @@ func setupRouter() *gin.Engine {
 	return r
 }
 
+// LogEntry 定义结构化日志条目
+type LogEntry struct {
+	Timestamp time.Time `json:"timestamp"`
+	Level     string    `json:"level"`
+	NodeID    string    `json:"node_id"`
+	JobID     string    `json:"job_id"`
+	Message   string    `json:"message"`
+	Duration  float64   `json:"duration,omitempty"`
+	Status    string    `json:"status,omitempty"`
+	Error     string    `json:"error,omitempty"`
+	Action    string    `json:"action,omitempty"`
+}
+
+// logJobEvent 记录任务事件到结构化日志
+func logJobEvent(jobID, nodeID, status, action string, duration float64, err error) {
+	entry := LogEntry{
+		Timestamp: time.Now(),
+		Level:     "INFO",
+		NodeID:    nodeID,
+		JobID:     jobID,
+		Status:    status,
+		Action:    action,
+		Duration:  duration,
+	}
+	
+	if err != nil {
+		entry.Level = "ERROR"
+		entry.Error = err.Error()
+	}
+	
+	logrus.WithField("event", entry).Info(action)
+}
+
 func transcodeHandler(c *gin.Context) {
 	var req struct {
 		InputPath      string   `json:"input_path"`
@@ -76,10 +110,12 @@ func transcodeHandler(c *gin.Context) {
 	jobID, err := PublishJob(job, false)
 	if err != nil {
 		log.Printf("Failed to publish job: %v", err)
+		logJobEvent(jobID, currentNodeID, "failed", "publish_job", 0, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to queue job"})
 		return
 	}
 
+	logJobEvent(jobID, currentNodeID, "published", "publish_job", 0, nil)
 	c.JSON(http.StatusOK, gin.H{"message": "Job queued successfully", "job_id": jobID})
 }
 
@@ -103,10 +139,12 @@ func transcodeVIPHandler(c *gin.Context) {
 	jobID, err := PublishJob(job, true)
 	if err != nil {
 		log.Printf("Failed to publish VIP job: %v", err)
+		logJobEvent(jobID, currentNodeID, "failed", "publish_vip_job", 0, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to queue VIP job"})
 		return
 	}
 
+	logJobEvent(jobID, currentNodeID, "published", "publish_vip_job", 0, nil)
 	c.JSON(http.StatusOK, gin.H{"message": "VIP job queued successfully", "job_id": jobID, "priority": "high"})
 }
 
@@ -243,6 +281,9 @@ func main() {
 	if *nodeGroup != "normal" && *nodeGroup != "priority" && *nodeGroup != "all" {
 		log.Fatalf("Invalid node-group: %s, must be normal/priority/all", *nodeGroup)
 	}
+
+	// 设置节点分组到 rabbitmq 模块
+	SetNodeGroup(*nodeGroup)
 
 	jobQueue = make(chan Job, *maxWorkers*2)
 	log.Printf("Initialized Node: %s (group: %s) with jobQueue capacity: %d", currentNodeID, *nodeGroup, *maxWorkers*2)

@@ -1,0 +1,176 @@
+version: '3.8'
+
+services:
+  # GoTranscode应用
+  gotranscode-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gotranscode-api
+    ports:
+      - "8078:8078"  # API端口
+      - "8066:8066"  # Metrics端口
+    environment:
+      - REDIS_ADDR=redis:6379
+      - RABBITMQ_ADDR=rabbitmq:5672
+      - ENABLE_API=true
+      - NODE_ID=api-node
+    depends_on:
+      - redis
+      - rabbitmq
+      - elasticsearch
+    volumes:
+      - ./output_path:/app/output_path
+    networks:
+      - transcode-net
+
+  gotranscode-worker1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gotranscode-worker1
+    environment:
+      - REDIS_ADDR=redis:6379
+      - RABBITMQ_ADDR=rabbitmq:5672
+      - ENABLE_API=false
+      - NODE_ID=worker-1
+    depends_on:
+      - redis
+      - rabbitmq
+    volumes:
+      - ./output_path:/app/output_path
+    networks:
+      - transcode-net
+
+  gotranscode-worker2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gotranscode-worker2
+    environment:
+      - REDIS_ADDR=redis:6379
+      - RABBITMQ_ADDR=rabbitmq:5672
+      - ENABLE_API=false
+      - NODE_ID=worker-2
+    depends_on:
+      - redis
+      - rabbitmq
+    volumes:
+      - ./output_path:/app/output_path
+    networks:
+      - transcode-net
+
+  # Redis
+  redis:
+    image: redis:7-alpine
+    container_name: gotranscode-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - transcode-net
+
+  # RabbitMQ
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: gotranscode-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    networks:
+      - transcode-net
+
+  # Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: gotranscode-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+    networks:
+      - transcode-net
+    depends_on:
+      - gotranscode-api
+
+  # Grafana
+  grafana:
+    image: grafana/grafana:latest
+    container_name: gotranscode-grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    networks:
+      - transcode-net
+    depends_on:
+      - prometheus
+
+  # Elasticsearch
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.14.0
+    container_name: gotranscode-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - xpack.security.enabled=false
+    ports:
+      - "9200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    networks:
+      - transcode-net
+
+  # Logstash
+  logstash:
+    image: docker.elastic.co/logstash/logstash:7.14.0
+    container_name: gotranscode-logstash
+    ports:
+      - "5044:5044"
+      - "5000:5000/tcp"
+      - "5000:5000/udp"
+      - "9600:9600"
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    volumes:
+      - ./logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml
+      - ./logstash/pipeline:/usr/share/logstash/pipeline
+    networks:
+      - transcode-net
+    depends_on:
+      - elasticsearch
+
+  # Kibana
+  kibana:
+    image: docker.elastic.co/kibana/kibana:7.14.0
+    container_name: gotranscode-kibana
+    ports:
+      - "5601:5601"
+    environment:
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    networks:
+      - transcode-net
+    depends_on:
+      - elasticsearch
+
+volumes:
+  prometheus_data:
+  grafana_data:
+  es_data:
+
+networks:
+  transcode-net:
+    driver: bridge

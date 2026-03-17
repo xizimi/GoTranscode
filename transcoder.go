@@ -9,7 +9,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
+
+	"github.com/sirupsen/logrus"
 )
 
 // Profile 定义分辨率档位及其优先级（越高越优先作为主档位）
@@ -281,21 +284,48 @@ func generateMasterPlaylist(profiles []string, jobID string) error {
 	return nil
 }
 
+// isValidInputPath 验证输入路径是否安全，防止路径穿越
+func isValidInputPath(inputPath string) bool {
+	// 检查是否包含危险字符
+	if strings.Contains(inputPath, "..") || strings.Contains(inputPath, "\\") {
+		return false
+	}
+	
+	// 获取绝对路径
+	absPath, err := filepath.Abs(inputPath)
+	if err != nil {
+		return false
+	}
+	
+	// 检查是否在允许的目录范围内（这里简化为检查是否为绝对路径）
+	// 实际生产环境中应该配置允许的输入目录白名单
+	return filepath.IsAbs(absPath)
+}
+
 // Transcode 主入口：使用 CQP 探针，生成 Master Playlist
 func Transcode(inputURL string, profiles []string, jobID string) error {
 	if jobID == "" {
 		return fmt.Errorf("jobID cannot be empty")
 	}
 
+	// 添加输入路径安全验证
+	if !isValidInputPath(inputURL) {
+		logJobEvent(jobID, currentNodeID, "failed", "invalid_input_path", 0, fmt.Errorf("invalid input path: %s", inputURL))
+		return fmt.Errorf("invalid input path: %s", inputURL)
+	}
+
 	absInput, err := filepath.Abs(inputURL)
 	if err != nil {
+		logJobEvent(jobID, currentNodeID, "failed", "resolve_input", 0, err)
 		return fmt.Errorf("resolve input: %w", err)
 	}
 	if _, err := os.Stat(absInput); os.IsNotExist(err) {
+		logJobEvent(jobID, currentNodeID, "failed", "input_not_found", 0, err)
 		return fmt.Errorf("input not found: %s", absInput)
 	}
 
 	if len(profiles) == 0 {
+		logJobEvent(jobID, currentNodeID, "failed", "empty_profiles", 0, nil)
 		return fmt.Errorf("profiles cannot be empty")
 	}
 
@@ -306,11 +336,16 @@ func Transcode(inputURL string, profiles []string, jobID string) error {
 	}
 	absOutputDir, err := filepath.Abs(outputDir)
 	if err != nil {
+		logJobEvent(jobID, currentNodeID, "failed", "resolve_output_dir", 0, err)
 		return fmt.Errorf("resolve output dir: %w", err)
 	}
 	if err := os.MkdirAll(absOutputDir, 0755); err != nil {
+		logJobEvent(jobID, currentNodeID, "failed", "create_output_dir", 0, err)
 		return fmt.Errorf("create output dir: %w", err)
 	}
+
+	logJobEvent(jobID, currentNodeID, "processing", "start_transcode", 0, nil)
+	startTime := time.Now()
 
 	// 确定主档位（最高清）
 	mainProfile := getHighestProfile(profiles)
@@ -319,16 +354,21 @@ func Transcode(inputURL string, profiles []string, jobID string) error {
 	//  生成 CQP 探针（仅视频，-qp 23）
 	probeTS := filepath.Join(absOutputDir, fmt.Sprintf("temp_probe_%s.ts", jobID))
 	if err := generateProbeTS(absInput, mainProfile, probeTS); err != nil {
+		logJobEvent(jobID, currentNodeID, "failed", "generate_cqp_probe", 0, err)
 		return fmt.Errorf("generate CQP probe: %w", err)
 	}
 	defer func() {
-    _ = os.Remove(probeTS) // 忽略"文件不存在"错误
+		_ = os.Remove(probeTS) // 忽略"文件不存在"错误
 	}()
 
 	// 分析复杂度 → 基础 CRF（使用主档位的参考值）
 	complexity, err := analyzeComplexityFromSize(probeTS, mainProfile)
 	if err != nil {
-		fmt.Printf("⚠️ Probe analysis failed, using default CRF=23: %v\n", err)
+		logrus.WithFields(logrus.Fields{
+			"job_id":  jobID,
+			"node_id": currentNodeID,
+			"profile": mainProfile,
+		}).Warnf("Probe analysis failed, using default CRF=23: %v", err)
 		complexity = 1.0
 	}
 	baseCRF := crfFromComplexity(complexity)
@@ -345,14 +385,19 @@ func Transcode(inputURL string, profiles []string, jobID string) error {
 			profile, finalCRF, getAudioBitrate(profile))
 
 		if err := transcodeFull(ctx, absInput, profile, jobID, finalCRF); err != nil {
+			logJobEvent(jobID, currentNodeID, "failed", "transcode_profile", 0, err)
 			return fmt.Errorf("transcode profile %s: %w", profile, err)
 		}
 	}
 
 	//  生成 Master Playlist
 	if err := generateMasterPlaylist(profiles, jobID); err != nil {
+		logJobEvent(jobID, currentNodeID, "failed", "generate_playlist", 0, err)
 		return fmt.Errorf("generate master playlist: %w", err)
 	}
+
+	totalDuration := time.Since(startTime).Seconds()
+	logJobEvent(jobID, currentNodeID, "completed", "finish_transcode", totalDuration, nil)
 
 	fmt.Printf("Transcode completed: %s.m3u8\n", jobID)
 	return nil

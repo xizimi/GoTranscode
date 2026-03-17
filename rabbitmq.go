@@ -30,8 +30,13 @@ var (
 	maxRetryCount = 3
 	
 	// 节点分组（由 main.go 设置）
-	currentNodeGroup = "all" // normal/priority/all
+	currentNodeGroup string // normal/priority/all
 )
+
+// SetNodeGroup 设置当前节点分组
+func SetNodeGroup(group string) {
+	currentNodeGroup = group
+}
 
 // JobMessage 包含重试计数的消息包装
 type JobMessage struct {

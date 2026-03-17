@@ -1,0 +1,127 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "GoTranscode Monitoring Dashboard",
+    "tags": ["transcode", "video"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Total Tasks",
+        "type": "stat",
+        "gridPos": { "x": 0, "y": 0, "w": 6, "h": 5 },
+        "targets": [
+          {
+            "expr": "sum(transcode_tasks_total)",
+            "legendFormat": "Total Tasks"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "thresholds"
+            },
+            "unit": "none",
+            "min": 0,
+            "max": 100,
+            "thresholds": {
+              "steps": [
+                { "color": "green", "value": null },
+                { "color": "red", "value": 80 }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 2,
+        "title": "Tasks by Status",
+        "type": "graph",
+        "gridPos": { "x": 6, "y": 0, "w": 12, "h": 8 },
+        "targets": [
+          {
+            "expr": "transcode_tasks_total",
+            "legendFormat": "{{status}}"
+          }
+        ]
+      },
+      {
+        "id": 3,
+        "title": "Node CPU Usage",
+        "type": "graph",
+        "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+        "targets": [
+          {
+            "expr": "node_cpu_usage_percent",
+            "legendFormat": "{{node_id}}"
+          }
+        ]
+      },
+      {
+        "id": 4,
+        "title": "Node Memory Usage",
+        "type": "graph",
+        "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+        "targets": [
+          {
+            "expr": "node_memory_usage_percent",
+            "legendFormat": "{{node_id}}"
+          }
+        ]
+      },
+      {
+        "id": 5,
+        "title": "Task Duration Histogram",
+        "type": "graph",
+        "gridPos": { "x": 0, "y": 16, "w": 12, "h": 8 },
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(transcode_duration_seconds_bucket[5m]))",
+            "legendFormat": "P95 Duration"
+          }
+        ]
+      },
+      {
+        "id": 6,
+        "title": "Tasks by Node",
+        "type": "graph",
+        "gridPos": { "x": 12, "y": 16, "w": 12, "h": 8 },
+        "targets": [
+          {
+            "expr": "node_transcode_tasks_total",
+            "legendFormat": "{{node_id}} - {{status}}"
+          }
+        ]
+      },
+      {
+        "id": 7,
+        "title": "RabbitMQ Queue Lengths",
+        "type": "graph",
+        "gridPos": { "x": 0, "y": 24, "w": 12, "h": 8 },
+        "targets": [
+          {
+            "expr": "rabbitmq_queue_length",
+            "legendFormat": "{{queue_group}}/{{queue_name}}"
+          }
+        ]
+      },
+      {
+        "id": 8,
+        "title": "Task Retries",
+        "type": "graph",
+        "gridPos": { "x": 12, "y": 24, "w": 12, "h": 8 },
+        "targets": [
+          {
+            "expr": "transcode_task_retries_total",
+            "legendFormat": "Retry {{retry_count}}"
+          }
+        ]
+      }
+    ],
+    "time": {
+      "from": "now-15m",
+      "to": "now"
+    },
+    "refresh": "5s"
+  }
+}

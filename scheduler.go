@@ -104,6 +104,10 @@ func startHeartbeat() {
 		if err := ReportNodeHeartbeat(currentNodeID, currentLoad); err != nil {
 			log.Printf("[Node %s] Heartbeat failed: %v", currentNodeID, err)
 		}
+		
+		// 更新监控指标
+		UpdateRabbitMQMetrics()
+		UpdateNodeMetrics(currentNodeID)
 	}
 }
 
